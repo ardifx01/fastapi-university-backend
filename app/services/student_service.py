@@ -1,9 +1,11 @@
 from pymongo.errors import DuplicateKeyError
+from pymongo import ReturnDocument
 from bson import ObjectId
 from bson.errors import InvalidId
 from datetime import datetime, timezone
 from app.config.database import MongoDB
-from app.models.student_model import Student, StudentUpdate
+# Pastikan StudentResponse juga diimpor untuk digunakan di service
+from app.models.student_model import Student, StudentUpdate, StudentResponse
 from app.utils.response import create_response
 
 class StudentService:
@@ -13,101 +15,91 @@ class StudentService:
         """Initializes the database connection and collection."""
         self.db = MongoDB.get_database()
         self.collection = self.db["students"]
-        # 💡 Praktik Terbaik: Buat index untuk memastikan keunikan NIM dan performa query
         self.collection.create_index([("nim", 1)], unique=True, partialFilterExpression={"is_deleted": False})
 
     def create_student(self, student: Student):
         """Creates a new student in the database."""
         try:
-            # ✅ Pydantic v2 menggunakan .model_dump() bukan .dict()
             student_dict = student.model_dump()
-            
-            # 💡 Penambahan field standar saat pembuatan
-            student_dict["created_at"] = datetime.now(timezone.utc)
-            student_dict["updated_at"] = datetime.now(timezone.utc)
-            
             result = self.collection.insert_one(student_dict)
+            created_student_doc = self.collection.find_one({"_id": result.inserted_id})
             
-            # ✅ Format respons setelah berhasil
-            created_student = self.collection.find_one({"_id": result.inserted_id})
-            created_student["id"] = str(created_student["_id"])
+            # ✅ Konsisten: Gunakan model Pydantic untuk memvalidasi dan membentuk respons
+            if created_student_doc:
+                response_data = StudentResponse.model_validate(created_student_doc)
+                return create_response(True, "Student created successfully", response_data.model_dump())
             
-            return create_response(True, "Student created successfully", created_student)
-        
+            # Fallback jika find_one gagal (sangat jarang terjadi)
+            return create_response(False, "Failed to retrieve student after creation", None, "INTERNAL_ERROR")
+            
         except DuplicateKeyError:
-            # ✅ Lebih andal menangani duplikat dari index database
             return create_response(False, "Student with this NIM already exists", None, "DUPLICATE_NIM")
 
     def get_student_by_id(self, student_id: str):
         """Retrieves a single student by their ID."""
         try:
             obj_id = ObjectId(student_id)
-            student = self.collection.find_one({"_id": obj_id, "is_deleted": False})
+            student_doc = self.collection.find_one({"_id": obj_id, "is_deleted": False})
             
-            if student:
-                student["id"] = str(student["_id"])
-                return create_response(True, "Student found", student)
+            if student_doc:
+                # ✅ Konsisten: Gunakan model Pydantic, ini akan menangani _id -> id
+                response_data = StudentResponse.model_validate(student_doc)
+                return create_response(True, "Student found", response_data.model_dump())
             
             return create_response(False, "Student not found", None, "NOT_FOUND")
         
         except InvalidId:
-            # ✅ Lebih spesifik menangani error ID yang tidak valid
             return create_response(False, "Invalid student ID format", None, "INVALID_ID")
 
     def get_all_students(self, skip: int = 0, limit: int = 10, filters: dict = None):
         """Retrieves a paginated list of students."""
         query = {"is_deleted": False}
         if filters:
-            # ✅ Memastikan filter tidak menimpa query utama
             query.update({k: v for k, v in filters.items() if k != "is_deleted"})
         
         cursor = self.collection.find(query).skip(skip).limit(limit)
-        students = list(cursor)
         
-        for student in students:
-            student["id"] = str(student["_id"])
+        # ✅ Konsisten: Gunakan list comprehension dan model Pydantic untuk transformasi
+        student_list = [StudentResponse.model_validate(doc).model_dump() for doc in cursor]
         
         total = self.collection.count_documents(query)
         
         data = {
-            "items": students,
+            "items": student_list,
             "total": total,
             "page": (skip // limit) + 1,
             "size": limit
         }
         return create_response(True, "Students retrieved successfully", data)
 
+    # ✅ PERBAIKAN UTAMA: Indentasi seluruh fungsi ini
     def update_student(self, student_id: str, student_data: StudentUpdate):
-        """Updates an existing student's data with version control."""
+        """Updates an existing student's data using an atomic operation."""
         try:
             obj_id = ObjectId(student_id)
             
-            # ✅ .model_dump(exclude_unset=True) hanya mengambil field yang dikirim klien
             update_fields = student_data.model_dump(exclude_unset=True)
             
             if not update_fields or all(k == "version" for k in update_fields):
                 return create_response(False, "No data provided to update", None, "NO_DATA")
 
-            # 💡 Pisahkan 'version' dari data yang akan di-update
             client_version = update_fields.pop("version", None)
             if client_version is None:
                 return create_response(False, "Version number is required for updates", None, "VERSION_REQUIRED")
-                
-            # ✅ Gunakan find_one_and_update untuk operasi atomik (lebih aman)
-            updated_student = self.collection.find_one_and_update(
+            
+            updated_student_doc = self.collection.find_one_and_update(
                 {"_id": obj_id, "is_deleted": False, "version": client_version},
                 {
                     "$set": {**update_fields, "updated_at": datetime.now(timezone.utc)},
                     "$inc": {"version": 1}
                 },
-                return_document=True  # Mengembalikan dokumen setelah di-update
+                return_document=ReturnDocument.AFTER 
             )
             
-            if updated_student:
-                updated_student["id"] = str(updated_student["_id"])
-                return create_response(True, "Student updated successfully", updated_student)
+            if updated_student_doc:
+                response_data = StudentResponse.model_validate(updated_student_doc)
+                return create_response(True, "Student updated successfully", response_data.model_dump())
             
-            # Jika gagal, cek penyebabnya
             existing_student = self.collection.find_one({"_id": obj_id, "is_deleted": False})
             if not existing_student:
                 return create_response(False, "Student not found", None, "NOT_FOUND")
@@ -130,7 +122,7 @@ class StudentService:
                         "deleted_at": datetime.now(timezone.utc),
                         "updated_at": datetime.now(timezone.utc)
                     },
-                    "$inc": {"version": 1} # Tetap increment versi saat soft delete
+                    "$inc": {"version": 1}
                 }
             )
             
