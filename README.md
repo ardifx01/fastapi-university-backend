@@ -40,8 +40,8 @@ Sebuah RESTful API yang dibangun menggunakan **Python**, **FastAPI**, dan **Mong
 
 1. **Clone repository ini:**
 ```
-git clone https://github.com/your-username/your-repo-name.git
-cd your-repo-name
+git clone https://github.com/Aseptrisna/fastapi-university-backend.git
+cd fastapi-university-backend
 ```
 
 2. **Buat virtual environment:**
