@@ -40,7 +40,7 @@ Sebuah RESTful API yang dibangun menggunakan **Python**, **FastAPI**, dan **Mong
 
 1. **Clone repository ini:**
 ```
-git clone https://github.com/Aseptrisna/fastapi-university-backend.git
+git clone https://github.com/ardifx01/fastapi-university-backend.git
 cd fastapi-university-backend
 ```
 
